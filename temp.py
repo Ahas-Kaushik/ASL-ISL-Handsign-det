@@ -10,9 +10,6 @@ import numpy as np
 from gtts import gTTS
 from PIL import Image
 
-
-#https://huggingface.co/prithivMLmods/Alphabet-Sign-Language-Detection
-# https://huggingface.co/Hemg/Indian-sign-language-classification/tree/main
 # --- DEPENDENCY CHECK ---
 try:
     from transformers import AutoModelForImageClassification, AutoImageProcessor
