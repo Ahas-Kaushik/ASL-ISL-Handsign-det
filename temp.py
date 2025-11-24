@@ -4,6 +4,8 @@ import torch
 import threading
 import time
 import io
+import os
+import json
 import pygame
 import string
 import numpy as np
@@ -12,25 +14,32 @@ from PIL import Image
 
 # --- DEPENDENCY CHECK ---
 try:
-    from transformers import AutoModelForImageClassification, AutoImageProcessor
+    from transformers import AutoConfig, AutoModelForImageClassification, AutoImageProcessor, ViTImageProcessor
+    from safetensors.torch import load_file
 except ImportError:
-    print("\nCRITICAL ERROR: 'transformers' library is missing.")
-    print("Please run: pip install transformers")
+    print("\nCRITICAL ERROR: Libraries missing.")
+    print("Please run: pip install transformers safetensors")
     exit()
 
 # ==============================================================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION (Your Specific Paths)
 # ==============================================================================
-# You can use local paths (folders containing model.safetensors & config.json)
-# OR you can use the HuggingFace ID strings directly if you have internet.
+# Base folder where all your files are mixed together
+BASE_PATH = r"C:\Users\Ahas Kaushik\OneDrive\Documents\aiml\5TH SEM_BMSCE\Sign_language_det\hand-sign-detection\models"
 
-# OPTION A: If you downloaded files to folders:
-ASL_MODEL_PATH = "C:/Users/Ahas Kaushik/Desktop/models/asl_model_folder" 
-ISL_MODEL_PATH = "C:/Users/Ahas Kaushik/Desktop/models/isl_model_folder"
+# Define the specific filenames for ASL (Based on your screenshot)
+ASL_FILES = {
+    "weights": os.path.join(BASE_PATH, "asl.safetensors"),
+    "config": os.path.join(BASE_PATH, "config (ASL).json"),
+    "preprocessor": os.path.join(BASE_PATH, "preprocessor_config(ASL).json")
+}
 
-# OPTION B: If you want to download/run directly from internet (Easiest):
-# ASL_MODEL_PATH = "prithivMLmods/Alphabet-Sign-Language-Detection"
-# ISL_MODEL_PATH = "Hemg/Indian-sign-language-classification"
+# Define the specific filenames for ISL
+ISL_FILES = {
+    "weights": os.path.join(BASE_PATH, "isl.safetensors"),
+    "config": os.path.join(BASE_PATH, "config (ISL).json"),
+    "preprocessor": os.path.join(BASE_PATH, "preprocessor_config(ISL).json")
+}
 
 # ==============================================================================
 # 2. HELPER CLASSES
@@ -61,7 +70,7 @@ class TextToSpeech:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Universal Sign Language Recognizer")
+        self.title("Universal Sign Language Recognizer (Custom Loader)")
         self.geometry("1100x700")
         
         self.mode = "ASL"
@@ -79,7 +88,7 @@ class App(ctk.CTk):
         self.setup_ui()
         
         # Initial Load
-        self.load_model_and_start(ASL_MODEL_PATH, "ASL")
+        self.load_custom_model("ASL", ASL_FILES)
 
     def setup_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -116,42 +125,78 @@ class App(ctk.CTk):
 
         if self.mode == "ASL":
             self.mode = "ISL"
-            target_path = ISL_MODEL_PATH
+            target_files = ISL_FILES
             self.btn_switch.configure(text="Switch to ASL", fg_color="#3498db")
             self.lbl_mode.configure(text="Current Mode: ISL")
         else:
             self.mode = "ASL"
-            target_path = ASL_MODEL_PATH
+            target_files = ASL_FILES
             self.btn_switch.configure(text="Switch to ISL", fg_color="#e74c3c")
             self.lbl_mode.configure(text="Current Mode: ASL")
 
         self.log(f"System: Switched to {self.mode}")
-        self.load_model_and_start(target_path, self.mode)
+        self.load_custom_model(self.mode, target_files)
 
-    def load_model_and_start(self, path, mode_name):
+    def load_custom_model(self, mode_name, files_dict):
         try:
-            print(f">> Loading Model from: {path}")
+            print(f"\n>> Loading {mode_name}...")
             
-            # --- THE MAGIC PART ---
-            # AutoImageProcessor: Automatically handles resizing/normalization for specific model
-            self.processor = AutoImageProcessor.from_pretrained(path)
+            # 1. LOAD CONFIG
+            # We load the config JSON manually because the filename is non-standard
+            config_path = files_dict["config"]
+            if not os.path.exists(config_path):
+                # Try without .json extension if user screenshot was misleading
+                config_path = config_path.replace(".json", "")
             
-            # AutoModelForImageClassification: Automatically detects architecture (ViT, ResNet, etc.)
-            self.model = AutoModelForImageClassification.from_pretrained(path)
+            print(f">> Loading Config from: {config_path}")
+            config = AutoConfig.from_pretrained(config_path)
             
+            # 2. LOAD PREPROCESSOR
+            # We fall back to standard ViT if the custom JSON fails or path is wrong
+            proc_path = files_dict["preprocessor"]
+            if not os.path.exists(proc_path):
+                proc_path = proc_path.replace(".json", "")
+
+            try:
+                # Try loading custom processor from the specific file
+                self.processor = AutoImageProcessor.from_pretrained(proc_path)
+                print(">> Success: Loaded custom image processor.")
+            except:
+                print(">> Warning: Could not load custom preprocessor. Using Standard ViT defaults.")
+                self.processor = ViTImageProcessor(
+                    size={"height": 224, "width": 224},
+                    image_mean=[0.5, 0.5, 0.5],
+                    image_std=[0.5, 0.5, 0.5]
+                )
+
+            # 3. INITIALIZE MODEL STRUCTURE
+            self.model = AutoModelForImageClassification.from_config(config)
+            
+            # 4. LOAD WEIGHTS MANUALLY
+            # This is key: we load the .safetensors file and inject it into the model
+            weights_path = files_dict["weights"]
+            print(f">> Loading Weights from: {weights_path}")
+            
+            state_dict = load_file(weights_path)
+            
+            # Load state dict (strict=False to ignore minor mismatches in heads)
+            keys = self.model.load_state_dict(state_dict, strict=False)
+            if len(keys.missing_keys) > 0:
+                print(f"   Missing Keys (usually fine for fine-tuned heads): {keys.missing_keys[0:3]}...")
+
             self.model.to(self.device)
             self.model.eval()
             
-            # Extract Labels directly from the model config!
+            # 5. SETUP LABELS
             self.id2label = self.model.config.id2label
             
-            self.log(f"System: Loaded {mode_name} (Architecture: {self.model.config.architectures[0]})")
+            self.log(f"System: Successfully Loaded {mode_name}")
             self.start_feed()
                 
         except Exception as e:
             self.log(f"Error loading model: {e}")
-            print(f"Detailed Error: {e}")
-            # We start feed anyway so you can see camera
+            print(f"CRITICAL ERROR: {e}")
+            # Start feed anyway to show camera works
             self.start_feed()
 
     def start_feed(self):
@@ -174,11 +219,11 @@ class App(ctk.CTk):
             frame = cv2.flip(frame, 1)
             
             # Convert BGR (OpenCV) to RGB (PIL)
-            # Hugging Face Processors expect PIL Images or RGB Arrays
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb_frame)
             
             detected_text = None
+            confidence_val = 0.0
             
             if self.model and self.processor:
                 try:
@@ -192,9 +237,10 @@ class App(ctk.CTk):
                         logits = outputs.logits
                         probs = torch.nn.functional.softmax(logits, dim=-1)
                         confidence, pred_idx = torch.max(probs, dim=-1)
+                        confidence_val = confidence.item()
                         
-                        # 3. Get Label
-                        if confidence.item() > 0.5: # 50% confidence threshold
+                        # 3. Get Label (Threshold 50%)
+                        if confidence_val > 0.5: 
                             label_idx = pred_idx.item()
                             # Fetch label string from model config
                             detected_text = self.id2label.get(label_idx, str(label_idx))
@@ -205,10 +251,15 @@ class App(ctk.CTk):
             if detected_text:
                 # Clean up label (sometimes they look like "LABEL_0" or "0")
                 if detected_text.startswith("LABEL_"):
-                    detected_text = detected_text.replace("LABEL_", "")
+                    try:
+                        idx = int(detected_text.replace("LABEL_", ""))
+                        if 0 <= idx < 26:
+                            detected_text = string.ascii_uppercase[idx]
+                    except:
+                        pass 
                 
                 # Draw on screen
-                cv2.putText(frame, f"{self.mode}: {detected_text} ({int(confidence.item()*100)}%)", (30, 50), 
+                cv2.putText(frame, f"{self.mode}: {detected_text} ({int(confidence_val*100)}%)", (30, 50), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 if detected_text != self.last_prediction:
